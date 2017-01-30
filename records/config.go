@@ -1,6 +1,7 @@
 package records
 
 import (
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
@@ -49,6 +50,8 @@ type Config struct {
 	// Mesos master(s): a list of IP:port pairs for one or more Mesos masters
 	Masters []string
 	// DNS server: IP address of the DNS server for forwarded accesses
+	ZoneResolvers map[string][]string
+	// DNS server: a list of IP addresses or IP:port pairs for DNS servers for forwarded accesses
 	Resolvers []string
 	// IPSources is the prioritized list of task IP sources
 	IPSources []string // e.g. ["host", "docker", "mesos", "rkt"]
@@ -78,11 +81,18 @@ type Config struct {
 	// CA certificate to use to verify Mesos Master certificate
 	CACertFile string
 
+	// Client certificate to use.
+	CertFile string
+	// Client certificate key to use.
+	KeyFile string
+
 	MesosCredentials basic.Credentials
 	// IAM Config File
 	IAMConfigFile string
 
 	caPool *x509.CertPool
+
+	cert tls.Certificate
 
 	httpConfigMap httpcli.ConfigMap
 
@@ -105,6 +115,7 @@ func NewConfig() Config {
 		SOARetry:            600,
 		SOAExpire:           86400,
 		SOAMinttl:           60,
+		ZoneResolvers:       map[string][]string{},
 		Resolvers:           []string{"8.8.8.8"},
 		Listener:            "0.0.0.0",
 		HTTPListener:        "0.0.0.0",
@@ -132,7 +143,7 @@ func SetConfig(cjson string) Config {
 		logging.Error.Fatalf("service validation failed: %v", err)
 	}
 	if err = validateMasters(c.Masters); err != nil {
-		logging.Error.Fatalf("Masters validation failed: %v", err)
+		logging.Error.Fatal(err)
 	}
 
 	c.initResolvers()
@@ -147,8 +158,20 @@ func SetConfig(cjson string) Config {
 
 	c.Domain = strings.ToLower(c.Domain)
 
-	c.initSOA()
+	err = validateDomainName(c.Domain)
+	if err != nil {
+		logging.Error.Fatalf("%s is not a valid domain name", c.Domain)
+	}
 
+	c.initSOA()
+	c.initCertificates()
+	c.initMesosAuthentication()
+	c.log()
+
+	return *c
+}
+
+func (c *Config) initCertificates() {
 	if c.CACertFile != "" {
 		pool, err := readCACertFile(c.CACertFile)
 		if err != nil {
@@ -157,10 +180,21 @@ func SetConfig(cjson string) Config {
 		c.caPool = pool
 	}
 
-	c.initMesosAuthentication()
-	c.log()
+	if c.CertFile != "" && c.KeyFile == "" {
+		logging.Error.Fatalf("Missing private key")
+	}
 
-	return *c
+	if c.CertFile == "" && c.KeyFile != "" {
+		logging.Error.Fatalf("Missing certificate")
+	}
+
+	if c.CertFile != "" && c.KeyFile != "" {
+		cert, err := tls.LoadX509KeyPair(c.CertFile, c.KeyFile)
+		if err != nil {
+			logging.Error.Fatal(err.Error())
+		}
+		c.cert = cert
+	}
 }
 
 func (c *Config) initMesosAuthentication() {
@@ -188,7 +222,10 @@ func (c *Config) initResolvers() {
 			c.Resolvers = GetLocalDNS()
 		}
 		if err := validateResolvers(c.Resolvers); err != nil {
-			logging.Error.Fatalf("Resolvers validation failed: %v", err)
+			logging.Error.Fatal(err)
+		}
+		if err := validateZoneResolvers(c.ZoneResolvers, c.Domain); err != nil {
+			logging.Error.Fatal(err)
 		}
 	}
 }
@@ -202,6 +239,10 @@ func (c *Config) initSOA() {
 
 func (c Config) log() {
 	// print configuration file
+	zoneResolversJSON, err := json.Marshal(c.ZoneResolvers)
+	if err != nil {
+		zoneResolversJSON = []byte(fmt.Sprintf("error: %v", err))
+	}
 	logging.Verbose.Println("Mesos-DNS configuration:")
 	logging.Verbose.Println("   - Masters: " + strings.Join(c.Masters, ", "))
 	logging.Verbose.Println("   - Zookeeper: ", c.Zk)
@@ -215,6 +256,8 @@ func (c Config) log() {
 	logging.Verbose.Println("   - TTL: ", c.TTL)
 	logging.Verbose.Println("   - Timeout: ", c.Timeout)
 	logging.Verbose.Println("   - StateTimeoutSeconds: ", c.StateTimeoutSeconds)
+
+	logging.Verbose.Println("   - ZoneResolvers: " + string(zoneResolversJSON))
 	logging.Verbose.Println("   - Resolvers: " + strings.Join(c.Resolvers, ", "))
 	logging.Verbose.Println("   - ExternalOn: ", c.ExternalOn)
 	logging.Verbose.Println("   - SOAMname: " + c.SOAMname)
@@ -233,6 +276,8 @@ func (c Config) log() {
 	logging.Verbose.Println("   - EnumerationOn", c.EnumerationOn)
 	logging.Verbose.Println("   - MesosHTTPSOn", c.MesosHTTPSOn)
 	logging.Verbose.Println("   - CACertFile", c.CACertFile)
+	logging.Verbose.Println("   - CertFile", c.CertFile)
+	logging.Verbose.Println("   - KeyFile", c.KeyFile)
 	logging.Verbose.Println("   - MesosAuthentication: ", c.MesosAuthentication)
 	switch c.MesosAuthentication {
 	case httpcli.AuthBasic:

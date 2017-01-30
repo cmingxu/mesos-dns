@@ -94,7 +94,7 @@ func runHandlers() error {
 	if err != nil {
 		return err
 	}
-	res.fwd = func(m *dns.Msg, net string) (*dns.Msg, error) {
+	fwd := func(m *dns.Msg, net string) (*dns.Msg, error) {
 		rr1, err := res.formatA("google.com.", "1.1.1.1")
 		if err != nil {
 			return nil, err
@@ -218,7 +218,7 @@ func runHandlers() error {
 						"ns1.mesos", "root.ns1.mesos", 60))),
 		},
 		{
-			res.HandleNonMesos,
+			res.HandleNonMesos(fwd),
 			Message(
 				Question("google.com.", dns.TypeA),
 				Header(false, dns.RcodeSuccess),
@@ -418,17 +418,26 @@ func TestMultiError(t *testing.T) {
 }
 
 func TestTruncate(t *testing.T) {
-	tm := newTruncated()
+	tm := *newTruncated()
 	if !tm.Truncated {
 		t.Fatal("Message not truncated")
 	}
 	if l := tm.Len(); l > 512 {
-		t.Fatalf("Message to large: %d bytes", l)
+		t.Fatalf("Message too large: %d bytes", l)
 	}
+	tm2 := *truncate(&tm, true)
+	if !tm2.Truncated {
+		t.Fatal("Original truncation status was not preseved")
+	}
+	if tm2.Len() != tm.Len() {
+		t.Fatal("Further modification to already truncated message")
+	}
+
 	tm.Answer = append(tm.Answer, genA(1)...)
 	if l := tm.Len(); l < 512 {
 		t.Fatalf("Message to small after adding answers: %d bytes", l)
 	}
+
 }
 
 func BenchmarkTruncate(b *testing.B) {
